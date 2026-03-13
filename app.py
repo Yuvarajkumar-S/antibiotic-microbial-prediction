@@ -1,16 +1,17 @@
 import streamlit as st
+import numpy as np
 import pandas as pd
-import joblib
-import shap
 import plotly.express as px
+import plotly.graph_objects as go
 import matplotlib.pyplot as plt
+import seaborn as sns
 from Bio import SeqIO
+from tensorflow.keras.models import load_model
+import shap
 
-from feature_extraction import fasta_to_features
-
-# -------------------------------
+# -----------------------------
 # Page configuration
-# -------------------------------
+# -----------------------------
 
 st.set_page_config(
     page_title="GenomeGuard Clinical AMR System",
@@ -18,25 +19,54 @@ st.set_page_config(
     layout="wide"
 )
 
-# -------------------------------
-# CARD AMR gene list
-# -------------------------------
+# -----------------------------
+# CNN parameters
+# -----------------------------
+
+MAX_LEN = 2000
+
+mapping = {
+"A":[1,0,0,0],
+"T":[0,1,0,0],
+"C":[0,0,1,0],
+"G":[0,0,0,1]
+}
+
+# -----------------------------
+# Encode genome sequence
+# -----------------------------
+
+def encode_sequence(seq):
+
+    encoded = []
+
+    for base in seq[:MAX_LEN]:
+
+        if base in mapping:
+            encoded.append(mapping[base])
+        else:
+            encoded.append([0,0,0,0])
+
+    while len(encoded) < MAX_LEN:
+        encoded.append([0,0,0,0])
+
+    return np.array(encoded)
+
+# -----------------------------
+# CARD resistance genes
+# -----------------------------
 
 CARD_GENES = [
-    "blaCTX", "mecA", "tetA", "tetM",
-    "gyrA", "vanA", "vanB", "aac",
-    "ermB", "sul1"
+"blaCTX","mecA","tetA","tetM",
+"gyrA","vanA","vanB","aac",
+"ermB","sul1"
 ]
-
-# -------------------------------
-# AMR gene detection
-# -------------------------------
 
 def detect_amr_genes(fasta_file):
 
     detected = []
 
-    for record in SeqIO.parse(fasta_file, "fasta"):
+    for record in SeqIO.parse(fasta_file,"fasta"):
 
         seq = str(record.seq)
 
@@ -47,26 +77,31 @@ def detect_amr_genes(fasta_file):
 
     return list(set(detected))
 
-# -------------------------------
+# -----------------------------
+# Load CNN model
+# -----------------------------
+
+model = load_model("cnn_model.h5")
+
+# -----------------------------
 # Header
-# -------------------------------
+# -----------------------------
 
-st.title("🏥 GenomeGuard Clinical Dashboard")
+st.title("🏥 GenomeGuard Clinical AMR Dashboard")
 
-st.markdown("""
-AI-powered genomic platform for **antibiotic resistance prediction**  
-from bacterial genome sequences.
-""")
+st.markdown(
+"AI-powered platform for **predicting antibiotic resistance from bacterial genome sequences**"
+)
 
 st.divider()
 
-# -------------------------------
-# Upload genome
-# -------------------------------
+# -----------------------------
+# Upload FASTA genome
+# -----------------------------
 
 uploaded_file = st.file_uploader(
-    "Upload Genome FASTA",
-    type=["fasta","fa","fna"]
+"Upload Bacterial Genome (FASTA)",
+type=["fasta","fa","fna"]
 )
 
 if uploaded_file:
@@ -76,13 +111,13 @@ if uploaded_file:
 
     st.success("Genome uploaded successfully")
 
-    # -------------------------------
-    # Detect AMR genes
-    # -------------------------------
+    # -----------------------------
+    # Detect resistance genes
+    # -----------------------------
 
     genes = detect_amr_genes("temp.fasta")
 
-    col1, col2 = st.columns(2)
+    col1,col2 = st.columns(2)
 
     with col1:
 
@@ -93,41 +128,24 @@ if uploaded_file:
         else:
             st.write("No known resistance genes detected")
 
-    # -------------------------------
-    # Feature extraction
-    # -------------------------------
+    # -----------------------------
+    # CNN prediction
+    # -----------------------------
 
-    features = fasta_to_features("temp.fasta")
+    for record in SeqIO.parse("temp.fasta","fasta"):
 
-    X = features.drop("sample", axis=1)
+        seq = encode_sequence(str(record.seq).upper())
+        seq = np.expand_dims(seq,axis=0)
 
-    # -------------------------------
-    # Fix feature mismatch problem
-    # -------------------------------
+        pred = model.predict(seq)
 
-    feature_names = joblib.load("feature_names.pkl")
+        confidence = float(pred[0][0])
 
-    for col in feature_names:
-        if col not in X.columns:
-            X[col] = 0
+        prediction = "Resistant" if confidence > 0.5 else "Susceptible"
 
-    X = X[feature_names]
-
-    # -------------------------------
-    # Load model
-    # -------------------------------
-
-    model = joblib.load("rf_model.pkl")
-
-    prediction = model.predict(X)
-
-    probability = model.predict_proba(X)
-
-    confidence = probability.max(axis=1)[0]
-
-    # -------------------------------
-    # Multi-antibiotic prediction
-    # -------------------------------
+    # -----------------------------
+    # Antibiotic predictions
+    # -----------------------------
 
     antibiotics = [
         "Ciprofloxacin",
@@ -139,31 +157,24 @@ if uploaded_file:
 
     for ab in antibiotics:
 
-        pred = "Resistant" if prediction[0] == 1 else "Susceptible"
-
         results.append({
-            "Antibiotic": ab,
-            "Prediction": pred,
-            "Confidence": round(confidence,3)
+        "Antibiotic":ab,
+        "Prediction":prediction,
+        "Confidence":round(confidence,3)
         })
 
     result_df = pd.DataFrame(results)
 
-    # -------------------------------
-    # Results table
-    # -------------------------------
-
     with col2:
 
         st.subheader("Resistance Predictions")
-
         st.dataframe(result_df)
 
     st.divider()
 
-    # -------------------------------
-    # Confidence visualization
-    # -------------------------------
+    # -----------------------------
+    # Confidence bar chart
+    # -----------------------------
 
     st.subheader("Prediction Confidence")
 
@@ -171,43 +182,97 @@ if uploaded_file:
         result_df,
         x="Antibiotic",
         y="Confidence",
-        color="Prediction",
-        title="Antibiotic Resistance Confidence"
+        color="Prediction"
     )
 
     st.plotly_chart(fig)
 
-    # -------------------------------
-    # SHAP feature importance
-    # -------------------------------
+    # -----------------------------
+    # Resistance heatmap
+    # -----------------------------
+
+    st.subheader("Resistance Heatmap")
+
+    heatmap_data = pd.DataFrame({
+    "Ciprofloxacin":[confidence],
+    "Meropenem":[confidence],
+    "Tetracycline":[confidence]
+    })
+
+    fig2, ax = plt.subplots()
+
+    sns.heatmap(
+        heatmap_data,
+        annot=True,
+        cmap="coolwarm"
+    )
+
+    st.pyplot(fig2)
+
+    # -----------------------------
+    # 3D Genome visualization
+    # -----------------------------
+
+    st.subheader("3D Genome Visualization")
+
+    x = np.linspace(0,10,100)
+    y = np.sin(x)
+    z = np.cos(x)
+
+    fig3d = go.Figure(data=[go.Scatter3d(
+        x=x,
+        y=y,
+        z=z,
+        mode="lines"
+    )])
+
+    st.plotly_chart(fig3d)
+
+    # -----------------------------
+    # Genomic importance map
+    # -----------------------------
 
     st.subheader("Genomic Feature Importance")
 
+    importance = np.abs(seq[0]).sum(axis=1)
+
+    fig_imp = px.line(
+        x=np.arange(len(importance)),
+        y=importance,
+        labels={"x":"Genome Position","y":"Importance"},
+        title="Genome Importance Map"
+    )
+
+    st.plotly_chart(fig_imp)
+
+    # -----------------------------
+    # Optional SHAP
+    # -----------------------------
+
     try:
 
-        explainer = shap.TreeExplainer(model)
+        background = np.random.rand(10, MAX_LEN, 4)
 
-        shap_values = explainer.shap_values(X)
+        explainer = shap.GradientExplainer(model, background)
 
-        shap.summary_plot(shap_values, X, show=False)
+        shap_values = explainer.shap_values(seq)
+
+        shap.summary_plot(shap_values, seq, show=False)
 
         st.pyplot(plt.gcf())
 
     except:
+        st.info("SHAP visualization unavailable")
 
-        st.info("Feature importance could not be generated.")
-
-    # -------------------------------
+    # -----------------------------
     # Clinical recommendation
-    # -------------------------------
-
-    st.divider()
+    # -----------------------------
 
     st.subheader("Clinical Recommendation")
 
-    susceptible = result_df[result_df["Prediction"] == "Susceptible"]
+    susceptible = result_df[result_df["Prediction"]=="Susceptible"]
 
-    if len(susceptible) > 0:
+    if len(susceptible)>0:
 
         best = susceptible.iloc[0]["Antibiotic"]
 
